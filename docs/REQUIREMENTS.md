@@ -71,40 +71,41 @@ The parser already extracts the merchant, date (DMY/MDY), total and currency. It
 - The model is configurable with `CLAUDE_MODEL` (default `claude-sonnet-5-5`). Images are sent as image blocks and PDFs as document blocks. Structured output matches `ExtractionResult`.
 - It runs only when the user chooses it. The UI notes that the file is sent to Anthropic.
 
-## 4. Data model (Supabase Postgres)
+## 4. Data model (Supabase Postgres) — `supabase/migrations/0002_households_items.sql`
 
-Every household-owned table has `household_id uuid not null` and an RLS policy `using (public.is_member(household_id)) with check (public.is_member(household_id))`.
+**One household per user.** Every data table has `household_id uuid not null default public.my_household_id()`, and its RLS policy is `household_id = (select public.my_household_id())`. `my_household_id()` is a `security definer` function that returns the caller's household. Composite foreign keys `(id, household_id)` make it impossible to link rows across households.
 
 ```
-household          id uuid PK, name text, created_at
-household_member   household_id FK, user_id FK→auth.users, role text check in ('owner','member'), PK(household_id,user_id)
-household_invite   id, household_id, code text unique, created_by, expires_at, used_by NULL
-household_setting  household_id PK, default_currency 'SGD', tax_label 'GST', expiry_window_days 30, default_ocr_engine 'vision'
+household          id, name, default_currency 'SGD', tax_label 'GST', expiry_window_days 30,
+                   default_ocr_engine 'vision', time_zone 'Asia/Singapore' (validated by trigger)
+household_member   household_id, user_id UNIQUE, role 'owner'|'member', joined_at
+household_invite   id, household_id, code (8 chars, no 0/O/1/I), created_by, expires_at (+7 days), used_by, used_at
 
-file        id uuid PK, household_id, sha256 text, storage_path text, original_name, mime, size, created_at
+file        id, household_id, sha256, storage_path (must start with "<household_id>/"), original_name, mime, size, created_by
             UNIQUE (household_id, sha256)
-receipt     id uuid PK, household_id, file_id FK→file, ocr_engine, raw_text,
-            receipt_no, purchase_date date, store_name, store_address,
-            subtotal numeric(12,2), tax numeric(12,2), total numeric(12,2), currency text default 'SGD',
-            payment_method, card_last4, notes,
-            warranty_months int check (>=0), warranty_start date, contact_id FK→contact,
-            created_by uuid default auth.uid(), created_at, updated_at
-            INDEX (household_id, store_name, receipt_no, purchase_date)
-item        id uuid PK, receipt_id FK ON DELETE CASCADE, household_id, position int,
-            description text not null, quantity numeric(10,3) default 1, unit_price numeric(12,2), line_total numeric(12,2),
-            model_no, serial_no, notes,
-            warranty_months int NULL check (>=0), warranty_start date NULL, contact_id NULL, no_warranty bool default false
-contact     id uuid PK, household_id, name not null, company, phone, email, address, website, notes
-tag         id uuid PK, household_id, name text, color; UNIQUE (household_id, lower(name))
-item_tag    item_id, tag_id, PK(item_id, tag_id)
-attachment  id uuid PK, item_id FK ON DELETE CASCADE, file_id FK, kind check in ('warranty_card','manual','photo','other'), label
+receipt     id, household_id, file_id, ocr_engine 'vision'|'claude'|'manual', raw_text,
+            receipt_no, purchase_date, store_name, store_address, subtotal, tax, total numeric(12,2),
+            currency 'SGD' (3 letters), payment_method, card_last4, notes,
+            warranty_months 0..1200, warranty_start, contact_id, created_by, created_at, updated_at
+item        id, receipt_id (cascade), household_id, position, description, quantity > 0, unit_price, line_total,
+            model_no, serial_no, notes, warranty_months, warranty_start, contact_id, no_warranty
+contact     id, household_id, name, company, phone, email, address, website, notes
+tag         id, household_id, name (unique per household, case-insensitive), color '#rrggbb'
+item_tag    item_id, tag_id, household_id
+attachment  id, item_id (cascade), file_id (cascade), household_id, kind 'warranty_card'|'manual'|'photo'|'other', label
 ```
 
-`public.is_member(hid)` is a `security definer` SQL function: `exists (select 1 from household_member where household_id = hid and user_id = auth.uid())`. When a new user signs up, a trigger creates their own household with them as owner. They can then join another household with an invite code, or invite others.
+**Household lifecycle** (RPCs; tables have no insert/delete policies for households or members):
+- A trigger on `auth.users` creates a household for every new sign-up, with the user as owner.
+- `create_invite()` returns a single-use code for the caller's household. Members can list and revoke their household's open invites.
+- `join_household(code)` moves the caller into the code's household. If they were the only member of their old household, that household is deleted, which is only allowed while it has no receipts or contacts. Otherwise they simply leave it.
+- `leave_household()` moves the caller into a fresh, empty household. The shared data stays with the remaining members. The only member of a household cannot leave it.
+- When an owner leaves, the longest-standing remaining member becomes owner.
+- `household_members()` lists members with their emails (`auth.users` is not exposed).
 
-Storage: the private bucket `receipts` stores objects as `<household_id>/<uuid>.<ext>`. Storage policies check `is_member((storage.foldername(name))[1]::uuid)`. The allowed MIME types add `application/pdf`.
+Storage: the private bucket `receipts` (10 MB limit; JPEG/PNG/WebP/PDF) stores objects at `<household_id>/<uuid>.<ext>`. Policies allow members to read, upload and delete within their household's folder.
 
-### 4.1 Effective warranty (view `item_warranty`, `security_invoker = true`)
+### 4.1 Effective warranty (view `item_warranty`, `security_invoker = true`, also returns `days_left`)
 ```
 months   = coalesce(item.warranty_months, receipt.warranty_months)
 start    = coalesce(item.warranty_start, receipt.warranty_start, receipt.purchase_date)
@@ -112,7 +113,7 @@ contact  = coalesce(item.contact_id, receipt.contact_id)
 expires  = (start + make_interval(months => months))::date   -- Postgres clamps month ends (Jan 31 + 1 mo = Feb 28/29)
 status   = none (no_warranty or no months/start) | expired | expiring (≤ expiry_window_days) | active
 ```
-"Today" uses the household's time zone, defaulting to `Asia/Singapore`. Every screen and export reads this view.
+"Today" uses the household's `time_zone`. Every screen and export reads this view.
 
 ## 5. Server surface (route handlers + server actions)
 
@@ -122,7 +123,7 @@ status   = none (no_warranty or no months/start) | expired | expiring (≤ expir
 | Action | `registerUpload(sha256, path, name, mime, size)` | Creates the `file` row, or returns the existing one (an exact duplicate warning) |
 | Action | `saveReceipt(payload)` | Inserts the receipt, items, item tags (creating new tags by name) and the receipt/item warranty fields in one RPC transaction (`save_receipt` SQL function) |
 | Action | `updateReceipt`, `deleteReceipt`, item/contact/tag CRUD, `setItemTags`, attachments | Editing |
-| Action | `createInvite`, `joinHousehold(code)`, `leaveHousehold` | Household sharing |
+| Action | `renameHousehold`, `createInvite`, `revokeInvite`, `joinHousehold(code)`, `leaveHousehold` | Household sharing (built in step 2, `/household`) |
 | Route | `GET /api/export/csv?entity=items\|receipts&…filters` | CSV of the filtered view |
 | Route | `GET /api/export/full` | A zip with JSON of every household table plus the original files |
 
@@ -144,19 +145,19 @@ Search and filters (store, item text, date range, tag, price range, warranty sta
 - Money is stored as `numeric`. In TS it is handled as numbers rounded to 2 dp only at the edges, and totals are reconciled in cents.
 - Upload limit: 10 MB per file (bucket limit). Images are shrunk in the browser; PDFs are uploaded as-is.
 - Free-tier limits: Vision's first 1,000 units a month are free (each PDF page counts as 1 unit); Supabase gives 500 MB DB and 1 GB storage, and pauses after about 1 week idle; OCR calls must finish within the Vercel function time limit.
-- Tests: the parser with `node --test`. Integration and RLS tests against a local Supabase (`supabase start`) will be added with the schema work.
+- Tests: the parser with `node --test`. Migrations, RLS, invites and the warranty view are tested in SQL (`supabase/tests/`, `npm run test:db`) on plain Postgres with a stand-in for Supabase's `auth`/`storage` schemas.
 
 ## 8. Build plan
 
 1. ✅ (from `main`) Next.js + Supabase + Vision skeleton: magic-link login, upload, basic parsing, receipt list with sort/group
-2. Schema v2: households + invites, items, contacts, tags, attachments, `item_warranty` view, RLS; migrate existing `receipts` rows
+2. ✅ Schema v2: households + invites, items, contacts, tags, attachments, `item_warranty` view, RLS, SQL tests; Household page; the existing upload and list moved to the new tables (grouping by `group_name` removed until tags arrive in step 4)
 3. Upload → extract → **review screen** → save; extended parser; PDF support; duplicate checks
 4. Warranty, contacts, tags and attachments UI; Items page
 5. Dashboard (expiring items), search & filters
 6. Claude engine + toggle / re-process
 7. CSV export + full export
 
-## 9. Open questions
+## 9. Resolved questions
 
-1. **Joining a household:** an invite code or link that a member pastes after signing in (proposed), or email invites sent by Supabase?
-2. **Existing data:** is the app from `main` already deployed with real receipts? If so, migration 0002 moves each user's rows into their own household, and converts `group_name` into a tag. Receipts without items get one item named after the store, so the tag has something to attach to.
+1. **Joining a household:** a single-use invite code (valid 7 days) that the new member enters after signing in.
+2. **Existing data:** the v1 app was never deployed, so migration 0002 drops the v1 `receipts` table instead of migrating it.

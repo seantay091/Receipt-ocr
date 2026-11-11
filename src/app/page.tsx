@@ -3,10 +3,11 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { RECEIPTS_BUCKET } from "@/lib/supabase/env";
-import { signOut } from "./actions";
+import { getHousehold } from "@/lib/household";
+import SiteHeader from "./site-header";
 import Uploader from "./uploader";
 import ReceiptCard from "./receipt-card";
-import { formatMoney, type Receipt } from "./types";
+import { formatMoney, type ReceiptWithFile } from "./types";
 
 const SORTS = {
   date_desc: { label: "Purchase date (newest)", column: "purchase_date", ascending: false },
@@ -16,10 +17,8 @@ const SORTS = {
 } as const;
 type SortKey = keyof typeof SORTS;
 
-const VIEWS = { list: "Single list", group: "By my groups", month: "By month" } as const;
+const VIEWS = { list: "Single list", month: "By month" } as const;
 type ViewKey = keyof typeof VIEWS;
-
-const UNGROUPED = "__none";
 
 function pick<T extends string>(value: unknown, options: Record<T, unknown>, fallback: T): T {
   return typeof value === "string" && value in options ? (value as T) : fallback;
@@ -44,7 +43,6 @@ async function Receipts({ searchParams }: Pick<PageProps<"/">, "searchParams">) 
   const params = await searchParams;
   const sort = pick<SortKey>(params.sort, SORTS, "date_desc");
   const view = pick<ViewKey>(params.view, VIEWS, "list");
-  const groupFilter = typeof params.group === "string" ? params.group : "";
 
   const supabase = await createClient();
   const {
@@ -52,49 +50,35 @@ async function Receipts({ searchParams }: Pick<PageProps<"/">, "searchParams">) 
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
+  const household = await getHousehold(supabase);
   const { column, ascending } = SORTS[sort];
-  let query = supabase
-    .from("receipts")
-    .select("*")
+  const { data: receipts, error } = await supabase
+    .from("receipt")
+    .select("*, file(storage_path, mime)")
     .order(column, { ascending, nullsFirst: false })
-    .order("created_at", { ascending: false });
-  if (groupFilter === UNGROUPED) query = query.is("group_name", null);
-  else if (groupFilter) query = query.eq("group_name", groupFilter);
-
-  const [{ data: receipts, error }, { data: groupRows }] = await Promise.all([
-    query.returns<Receipt[]>(),
-    supabase.from("receipts").select("group_name").not("group_name", "is", null),
-  ]);
-
-  const groups = [...new Set((groupRows ?? []).map((g) => g.group_name as string))].sort((a, b) => a.localeCompare(b));
+    .order("created_at", { ascending: false })
+    .returns<ReceiptWithFile[]>();
 
   // Private bucket → short-lived signed URLs for thumbnails.
   const urlByPath = new Map<string, string>();
-  if (receipts?.length) {
-    const { data: signed } = await supabase.storage
-      .from(RECEIPTS_BUCKET)
-      .createSignedUrls(receipts.map((r) => r.image_path), 60 * 60);
+  const paths = (receipts ?? []).flatMap((r) => (r.file ? [r.file.storage_path] : []));
+  if (paths.length) {
+    const { data: signed } = await supabase.storage.from(RECEIPTS_BUCKET).createSignedUrls(paths, 60 * 60);
     signed?.forEach((s) => s.path && s.signedUrl && urlByPath.set(s.path, s.signedUrl));
   }
 
   // Bucket receipts into sections for the chosen view (order within each is preserved).
-  const sections = new Map<string, Receipt[]>();
+  const sections = new Map<string, ReceiptWithFile[]>();
   for (const r of receipts ?? []) {
-    const key = view === "group" ? (r.group_name ?? "Ungrouped") : view === "month" ? monthLabel(r.purchase_date) : "";
+    const key = view === "month" ? monthLabel(r.purchase_date) : "";
     sections.set(key, [...(sections.get(key) ?? []), r]);
   }
 
   return (
     <>
-      <header className="row spread">
-        <h1>My receipts</h1>
-        <form action={signOut} className="row">
-          <span className="muted small">{user.email}</span>
-          <button type="submit" className="secondary">Sign out</button>
-        </form>
-      </header>
+      <SiteHeader title="Receipts" email={user.email} householdName={household.name} />
 
-      <Uploader userId={user.id} groups={groups} />
+      <Uploader householdId={household.id} />
 
       <form className="row filters" method="get">
         <label>
@@ -113,26 +97,16 @@ async function Receipts({ searchParams }: Pick<PageProps<"/">, "searchParams">) 
             ))}
           </select>
         </label>
-        <label>
-          Group
-          <select name="group" defaultValue={groupFilter}>
-            <option value="">All groups</option>
-            <option value={UNGROUPED}>Ungrouped</option>
-            {groups.map((g) => (
-              <option key={g} value={g}>{g}</option>
-            ))}
-          </select>
-        </label>
         <button type="submit" className="secondary">Apply</button>
-        {(params.sort || params.view || params.group) && <Link href="/" className="small">Reset</Link>}
+        {(params.sort || params.view) && <Link href="/" className="small">Reset</Link>}
       </form>
 
-      {error && <p className="error">Could not load receipts: {error.message}. Did you run supabase/migrations/0001_init.sql?</p>}
+      {error && <p className="error">Could not load receipts: {error.message}</p>}
       {!error && receipts?.length === 0 && <p className="muted">No receipts yet. Upload a photo to get started.</p>}
 
       {[...sections.entries()].map(([title, items]) => {
         const sum = items.reduce((acc, r) => acc + (r.total === null ? 0 : Number(r.total)), 0);
-        const currencies = new Set(items.map((r) => r.currency).filter(Boolean));
+        const currencies = new Set(items.map((r) => r.currency));
         return (
           <section key={title || "all"} className="stack">
             {title && (
@@ -146,7 +120,7 @@ async function Receipts({ searchParams }: Pick<PageProps<"/">, "searchParams">) 
             )}
             <div className="grid">
               {items.map((r) => (
-                <ReceiptCard key={r.id} receipt={r} imageUrl={urlByPath.get(r.image_path) ?? null} />
+                <ReceiptCard key={r.id} receipt={r} imageUrl={r.file ? (urlByPath.get(r.file.storage_path) ?? null) : null} />
               ))}
             </div>
           </section>

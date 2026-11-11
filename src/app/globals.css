@@ -102,3 +102,9 @@ details pre { white-space: pre-wrap; font-size: 0.75rem; max-height: 200px; over
 @media (max-width: 400px) {
   .grid { grid-template-columns: 1fr; }
 }
+
+.nav-links { gap: 16px; align-items: center; }
+ul.plain { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+ul.plain li { padding: 6px 0; border-bottom: 1px solid var(--border); }
+ul.plain li:last-child { border-bottom: 0; }
+.invite-code { font-size: 1.15rem; letter-spacing: 0.15em; font-weight: 600; }
