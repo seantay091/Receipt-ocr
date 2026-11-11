@@ -1,6 +1,6 @@
 # Receipt OCR & Warranty Tracker — Requirements & Low-Level Design
 
-Status: **Draft v1** (from requirements Q&A, 2026-11-11)
+Status: **v1 — confirmed** (from requirements Q&A, 2026-11-11)
 
 ## 1. Summary
 
@@ -83,7 +83,6 @@ receipt
   payment_method TEXT, card_last4 TEXT, notes TEXT,
   -- receipt-level warranty defaults
   warranty_months INT NULL, warranty_start DATE NULL, contact_id FK→contact NULL,
-  added_by TEXT NULL,            -- free-text name, since there are no logins
   created_at, updated_at
   INDEX (store_name, receipt_no, purchase_date)
 
@@ -171,10 +170,10 @@ Duplicate check on upload: an exact `sha256` match → strong warning. A match o
 - Testing: unit tests for the parser using sample receipt text fixtures; API tests with pytest + httpx; a mocked Claude client.
 - Packaging: `Dockerfile` (with Tesseract installed) + `docker-compose.yml` mounting `./data`, plus a non-Docker dev setup (README).
 
-## 8. Open questions / assumptions to confirm
+## 8. Resolved decisions (formerly open questions)
 
-1. **Original files:** the review screen needs the original, so the design **keeps all uploaded files** under `data/files`. Confirm, or should originals be deleted after saving?
-2. **"Added by":** with no logins, should there be an optional free-text "added by" name (currently in the model), or should it be dropped?
-3. **Open-source OCR engine:** Tesseract is lighter to install. PaddleOCR is more accurate on receipts but heavier (about 1 GB). Start with Tesseract and add PaddleOCR as an optional engine later?
-4. **Multi-page PDFs** containing several receipts: treat 1 PDF as 1 receipt in v1?
-5. **Warranty units:** months only, or also years/days (stored as months/days)?
+1. **Original files:** all uploaded originals are **kept** under `data/files` and can be viewed from the receipt page.
+2. **"Added by":** **dropped.** No user attribution is stored.
+3. **Open-source OCR engine:** **Tesseract** in v1. PaddleOCR may be added later as an optional engine behind the same `OcrEngine` interface.
+4. **PDFs:** **1 PDF = 1 receipt** in v1. All pages are OCR'd and their text joined.
+5. **Warranty units:** **months only** (`warranty_months INT`).
