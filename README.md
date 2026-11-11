@@ -1,6 +1,6 @@
 # Receipt-ocr
 
-Users upload photos of receipts. The app reads the **store, purchase date, total and currency** with OCR, and lets users sort receipts by purchase date or put them into their own groups.
+Users upload photos of receipts. The app reads the **store, purchase date, total and currency** with OCR, and lets users sort receipts by purchase date. Receipts are shared by everyone in a **household**: each person signs in with their own email and joins with an invite code.
 
 **Stack (all free tiers):**
 
@@ -13,16 +13,19 @@ Users upload photos of receipts. The app reads the **store, purchase date, total
 ## How it works
 
 1. The user signs in with a magic link sent by Supabase Auth.
-2. The browser shrinks the photo and uploads it straight to a private Supabase Storage bucket, in `receipts/<user-id>/…`.
-3. `POST /api/ocr` downloads the photo, sends it to Google Vision, and parses the text (`src/lib/parse-receipt.ts`). It then saves a row in `public.receipts`.
-4. The home page lists receipts. Users can sort by purchase date, upload time or total, filter by group, and view them as one list, by group, or by month. Every field can be edited, since OCR is not always right.
+2. Every new user gets their own household. On the **Household** page they can create a one-time invite code (valid 7 days) for a family member, who enters it to join.
+3. The browser shrinks the photo and uploads it straight to a private Supabase Storage bucket, in `receipts/<household-id>/…`.
+4. `POST /api/ocr` downloads the photo, sends it to Google Vision, and parses the text (`src/lib/parse-receipt.ts`). It then saves a `file` row and a `receipt` row.
+5. The home page lists the household's receipts. Users can sort by purchase date, upload time or total, and view them as one list or by month. Every field can be edited, since OCR is not always right.
 
-Row-level security makes sure each user can only see their own receipts and photos.
+Row-level security makes sure people only see their own household's receipts and photos.
+
+> **Planned:** shared household accounts, line items, per-item warranties, repair contacts, tags, a review screen before saving, PDF support and an optional Claude OCR engine. See [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for the full design and build plan.
 
 ## 1. Set up Supabase
 
 1. Create a free project at <https://supabase.com/dashboard>.
-2. Go to **SQL Editor** and paste in and run [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql). This creates the table, the security policies and the `receipts` storage bucket.
+2. Go to **SQL Editor** and run each file in [`supabase/migrations/`](supabase/migrations) **in order** (`0001_…`, then `0002_…`). Together they create the tables, the security policies, the household sign-up trigger and the `receipts` storage bucket.
 3. Go to **Project Settings → API** and copy the **Project URL** and the **publishable** key. The legacy `anon` key also works.
 
 ## 2. Get a Google Vision API key
@@ -38,6 +41,12 @@ cp .env.example .env.local   # then fill in the three values
 npm install
 npm run dev                  # http://localhost:3000
 npm test                     # receipt parser tests
+```
+
+Database tests (migrations, security policies, invites, warranty view) run against a plain local Postgres 15+ server, not a Supabase project:
+
+```bash
+TEST_DATABASE_URL=postgres://postgres@localhost:5432/postgres npm run test:db
 ```
 
 In Supabase, go to **Authentication → URL Configuration** and add `http://localhost:3000/**` to **Redirect URLs** so magic links work locally.
@@ -69,7 +78,8 @@ From then on, every push to `main` redeploys on its own.
 src/
   proxy.ts                 # refreshes the auth session, redirects signed-out users to /login
   app/
-    page.tsx               # receipt list with sort / filter / grouping
+    page.tsx               # receipt list with sort / month grouping
+    household/             # members, invite codes, join / leave
     uploader.tsx           # photo shrink + upload + OCR call
     receipt-card.tsx       # view / edit / delete one receipt
     actions.ts             # server actions: update, delete, sign out
@@ -79,5 +89,7 @@ src/
     ocr.ts                 # Google Vision client
     parse-receipt.ts       # text → merchant / date / total / currency (+ tests)
     supabase/              # browser + server Supabase clients
-supabase/migrations/       # SQL schema, RLS policies and storage bucket
+supabase/migrations/       # SQL schema, RLS policies and storage bucket (run in order)
+supabase/tests/            # SQL tests + a stand-in for Supabase's auth/storage schemas
+scripts/test-db.sh         # runs migrations + SQL tests on a throwaway database
 ```

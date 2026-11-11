@@ -22,10 +22,9 @@ async function shrink(file: File): Promise<Blob> {
   }
 }
 
-export default function Uploader({ userId, groups }: { userId: string; groups: string[] }) {
+export default function Uploader({ householdId }: { householdId: string }) {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
-  const [group, setGroup] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -38,7 +37,8 @@ export default function Uploader({ userId, groups }: { userId: string; groups: s
     for (const [i, file] of [...files].entries()) {
       setBusy(`Reading receipt ${i + 1} of ${files.length}…`);
       const blob = await shrink(file);
-      const path = `${userId}/${crypto.randomUUID()}.jpg`;
+      // Storage policies only allow writes inside the household's folder.
+      const path = `${householdId}/${crypto.randomUUID()}.jpg`;
 
       const { error: upErr } = await supabase.storage
         .from("receipts")
@@ -51,7 +51,7 @@ export default function Uploader({ userId, groups }: { userId: string; groups: s
       const res = await fetch("/api/ocr", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, group }),
+        body: JSON.stringify({ path, name: file.name }),
       });
       const json = await res.json().catch(() => ({}));
       if (!res.ok) problems.push(`${file.name}: ${json.error ?? res.statusText}`);
@@ -67,15 +67,7 @@ export default function Uploader({ userId, groups }: { userId: string; groups: s
   return (
     <section className="card stack">
       <div className="row">
-        <label className="grow">
-          Add to group (optional)
-          <input list="group-options" value={group} onChange={(e) => setGroup(e.target.value)} placeholder="e.g. Groceries, Travel" />
-          <datalist id="group-options">
-            {groups.map((g) => (
-              <option key={g} value={g} />
-            ))}
-          </datalist>
-        </label>
+        <p className="grow muted small">Photos are shared with everyone in your household.</p>
         <button type="button" onClick={() => inputRef.current?.click()} disabled={!!busy}>
           {busy ?? "Upload receipt photos"}
         </button>
